@@ -18,11 +18,26 @@
     #pinsList { max-height: 160px; overflow: auto; font-size: 12px; margin-top: 8px; }
     .pinRow { opacity: 0.95; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
     .pinRow code { opacity: 0.9; }
+
+    .pinLabel {
+  position: fixed;
+  z-index: 9;
+  pointer-events: none;
+  transform: translate(-50%, -120%);
+  background: rgba(0,0,0,0.75);
+  color: white;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  border: 1px solid rgba(255,255,255,0.15);
+}
   </style>
 </head>
 <body>
 
 <div id="hud">
+    <div id="labels"></div>
   <div><strong>Pins</strong> (click on the scan to add)</div>
   <div>
     Peer URL (the other Pi):<br />
@@ -134,19 +149,65 @@ const pinMeshesById = new Map();
 //   pinMeshesById.set(pin.id, mesh);
 // }
 
+// function addPinMesh(pin) {
+//   if (pinMeshesById.has(pin.id)) return;
+
+//   const mat = new THREE.SpriteMaterial({ color: 0xff2dd4 }); // bright pink
+//   const sprite = new THREE.Sprite(mat);
+//   sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
+
+//   // scale based on scan size (we’ll set PIN_SCALE after loading)
+//   const s = window.PIN_SCALE || 0.05;
+//   sprite.scale.set(s, s, 1);
+
+//   pinGroup.add(sprite);
+//   pinMeshesById.set(pin.id, sprite);
+// }
+
+function updatePinLabels() {
+  for (const obj of pinMeshesById.values()) {
+    const { sprite, label, pin } = obj;
+
+    const v = new THREE.Vector3(pin.pos.x, pin.pos.y, pin.pos.z);
+    v.project(camera);
+
+    // behind camera? hide
+    if (v.z < -1 || v.z > 1) {
+      label.style.display = "none";
+      continue;
+    }
+
+    const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+
+    label.style.display = "block";
+    label.style.left = x + "px";
+    label.style.top = y + "px";
+  }
+}
+
+const labelsEl = document.getElementById("labels");
+
 function addPinMesh(pin) {
   if (pinMeshesById.has(pin.id)) return;
 
-  const mat = new THREE.SpriteMaterial({ color: 0xff2dd4 }); // bright pink
+  // 3D sprite marker
+  const mat = new THREE.SpriteMaterial({ color: 0xff2dd4 });
   const sprite = new THREE.Sprite(mat);
   sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
 
-  // scale based on scan size (we’ll set PIN_SCALE after loading)
   const s = window.PIN_SCALE || 0.05;
   sprite.scale.set(s, s, 1);
 
   pinGroup.add(sprite);
-  pinMeshesById.set(pin.id, sprite);
+
+  // DOM label
+  const label = document.createElement("div");
+  label.className = "pinLabel";
+  label.textContent = pin.text || "(no text)";
+  labelsEl.appendChild(label);
+
+  pinMeshesById.set(pin.id, { sprite, label, pin });
 }
 
 function renderPinsList(pins) {
@@ -353,8 +414,11 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   pins = [];
   saveLocalPins(pins);
   // remove meshes
-  for (const m of pinMeshesById.values()) pinGroup.remove(m);
-  pinMeshesById.clear();
+  for (const obj of pinMeshesById.values()) {
+  pinGroup.remove(obj.sprite);
+  obj.label.remove();
+}
+pinMeshesById.clear();
   renderPinsList(pins);
   setStatus("cleared local pins");
 });
@@ -366,6 +430,7 @@ document.getElementById("clearBtn").addEventListener("click", () => {
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  updatePinLabels();
   renderer.render(scene, camera);
 }
 animate();
