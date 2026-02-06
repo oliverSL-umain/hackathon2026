@@ -1,445 +1,464 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Local-first PLY Pins (r146)</title>
-  <style>
-    body { margin: 0; overflow: hidden; font-family: system-ui, Arial; }
-    canvas { display: block; }
+  <head>
+    <meta charset="UTF-8" />
+    <title>Local-first PLY Pins (r146)</title>
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <div id="hud">
+      <div id="labels"></div>
+      <div><strong>Pins</strong> (click on the scan to add)</div>
+      <div>
+        Peer URL (the other Pi):<br />
+        <input
+          id="peerUrl"
+          style="width: 100%"
+          placeholder="http://raspberrypi.local:8080"
+          value="http://localhost:8083"
+        />
+      </div>
+      <div>
+        <button id="syncBtn">Sync</button>
+        <button id="exportBtn">Export JSON</button>
+        <button id="clearBtn">Clear local pins</button>
+      </div>
+      <div id="status">Status: idle</div>
+      <div id="pinsList"></div>
+    </div>
 
-    /* Simple HUD */
-    #hud {
-      position: fixed; left: 12px; top: 12px; z-index: 10;
-      background: rgba(0,0,0,0.6); color: #fff; padding: 10px 12px;
-      border-radius: 8px; width: 320px;
-    }
-    #hud button { margin-right: 8px; margin-top: 8px; }
-    #status { opacity: 0.9; font-size: 12px; margin-top: 8px; }
-    #pinsList { max-height: 160px; overflow: auto; font-size: 12px; margin-top: 8px; }
-    .pinRow { opacity: 0.95; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
-    .pinRow code { opacity: 0.9; }
+    <!-- three r146 compatible -->
+    <script src="scripts/three.min.js"></script>
+    <script src="scripts/OrbitControls.js"></script>
+    <script src="scripts/PLYLoader.js"></script>
 
-    .pinLabel {
-  position: fixed;
-  z-index: 9;
-  pointer-events: none;
-  transform: translate(-50%, -120%);
-  background: rgba(0,0,0,0.75);
-  color: white;
-  padding: 4px 6px;
-  border-radius: 6px;
-  font-size: 12px;
-  white-space: nowrap;
-  border: 1px solid rgba(255,255,255,0.15);
-}
-  </style>
-</head>
-<body>
+    <script>
+      /**
+       * What this does:
+       * - Loads scan.ply and shows it as Points with height coloring (your original)
+       * - Lets you click on the scan to add a "pin" (small yellow sphere) with a text note
+       * - Stores pins locally in localStorage (works offline)
+       * - Sync button exchanges pins with a peer Pi over HTTP:
+       *     GET  {peer}/pins  -> returns JSON array of pins
+       *     POST {peer}/pins  -> accepts JSON array of pins, merges them
+       *
+       * You need a tiny server on each Pi serving:
+       *   - this index.html + scan.ply
+       *   - a /pins endpoint (example Node server code is below the HTML)
+       */
 
-<div id="hud">
-    <div id="labels"></div>
-  <div><strong>Pins</strong> (click on the scan to add)</div>
-  <div>
-    Peer URL (the other Pi):<br />
-    <input id="peerUrl" style="width: 100%;" placeholder="http://raspberrypi.local:8080" />
-  </div>
-  <div>
-    <button id="syncBtn">Sync</button>
-    <button id="exportBtn">Export JSON</button>
-    <button id="clearBtn">Clear local pins</button>
-  </div>
-  <div id="status">Status: idle</div>
-  <div id="pinsList"></div>
-</div>
+      //////////////////////
+      // Basic identifiers //
+      //////////////////////
 
-<!-- three r146 compatible -->
-<script src="three.min.js"></script>
-<script src="OrbitControls.js"></script>
-<script src="PLYLoader.js"></script>
+      const DEVICE_ID_KEY = "pins.deviceId";
+      function getOrCreateDeviceId() {
+        let id = localStorage.getItem(DEVICE_ID_KEY);
+        if (!id) {
+          id =
+            "pi-" +
+            Math.random().toString(16).slice(2) +
+            "-" +
+            Date.now().toString(16);
+          localStorage.setItem(DEVICE_ID_KEY, id);
+        }
+        return id;
+      }
+      const DEVICE_ID = getOrCreateDeviceId();
 
-<script>
-/**
- * What this does:
- * - Loads scan.ply and shows it as Points with height coloring (your original)
- * - Lets you click on the scan to add a "pin" (small yellow sphere) with a text note
- * - Stores pins locally in localStorage (works offline)
- * - Sync button exchanges pins with a peer Pi over HTTP:
- *     GET  {peer}/pins  -> returns JSON array of pins
- *     POST {peer}/pins  -> accepts JSON array of pins, merges them
- *
- * You need a tiny server on each Pi serving:
- *   - this index.html + scan.ply
- *   - a /pins endpoint (example Node server code is below the HTML)
- */
+      const PINS_KEY = "pins.list.v1";
+      function loadLocalPins() {
+        try {
+          return JSON.parse(localStorage.getItem(PINS_KEY) || "[]");
+        } catch {
+          return [];
+        }
+      }
+      function saveLocalPins(pins) {
+        // localStorage.setItem(PINS_KEY, JSON.stringify(pins));
+      }
 
-//////////////////////
-// Basic identifiers //
-//////////////////////
+      function setStatus(msg) {
+        document.getElementById("status").textContent = "Status: " + msg;
+      }
 
-const DEVICE_ID_KEY = "pins.deviceId";
-function getOrCreateDeviceId() {
-  let id = localStorage.getItem(DEVICE_ID_KEY);
-  if (!id) {
-    id = "pi-" + Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
-    localStorage.setItem(DEVICE_ID_KEY, id);
-  }
-  return id;
-}
-const DEVICE_ID = getOrCreateDeviceId();
+      //////////////////////
+      // Three.js setup    //
+      //////////////////////
 
-const PINS_KEY = "pins.list.v1";
-function loadLocalPins() {
-  try { return JSON.parse(localStorage.getItem(PINS_KEY) || "[]"); }
-  catch { return []; }
-}
-function saveLocalPins(pins) {
-  localStorage.setItem(PINS_KEY, JSON.stringify(pins));
-}
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x05060a);
 
-function setStatus(msg) {
-  document.getElementById("status").textContent = "Status: " + msg;
-}
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.01,
+        2000,
+      );
+      camera.position.set(0, 0, 5);
 
-//////////////////////
-// Three.js setup    //
-//////////////////////
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x05060a);
+      const controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
 
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 2000);
-camera.position.set(0, 0, 5);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
+      let pointsObj = null; // THREE.Points
+      let geometryRef = null; // BufferGeometry for points
+      let pinGroup = new THREE.Group();
+      scene.add(pinGroup);
 
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+      // Raycasting for picking
+      const raycaster = new THREE.Raycaster();
+      raycaster.params.Points.threshold = 0.3; // picking tolerance in world units (tune)
+      const mouse = new THREE.Vector2();
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
+      //////////////////////
+      // Pins rendering    //
+      //////////////////////
 
-let pointsObj = null;      // THREE.Points
-let geometryRef = null;    // BufferGeometry for points
-let pinGroup = new THREE.Group();
-scene.add(pinGroup);
+      // id -> Mesh so we don't duplicate
+      const pinMeshesById = new Map();
 
-// Raycasting for picking
-const raycaster = new THREE.Raycaster();
-raycaster.params.Points.threshold = 0.3; // picking tolerance in world units (tune)
-const mouse = new THREE.Vector2();
+      function updatePinLabels() {
+        for (const obj of pinMeshesById.values()) {
+          const { sprite, label, pin } = obj;
 
-//////////////////////
-// Pins rendering    //
-//////////////////////
+          const v = new THREE.Vector3(pin.pos.x, pin.pos.y, pin.pos.z);
+          v.project(camera);
 
-// id -> Mesh so we don't duplicate
-const pinMeshesById = new Map();
+          // behind camera? hide
+          if (v.z < -1 || v.z > 1) {
+            label.style.display = "none";
+            continue;
+          }
 
-function updatePinLabels() {
-  for (const obj of pinMeshesById.values()) {
-    const { sprite, label, pin } = obj;
+          const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+          const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
 
-    const v = new THREE.Vector3(pin.pos.x, pin.pos.y, pin.pos.z);
-    v.project(camera);
+          label.style.display = "block";
+          label.style.left = x + "px";
+          label.style.top = y + "px";
+        }
+      }
 
-    // behind camera? hide
-    if (v.z < -1 || v.z > 1) {
-      label.style.display = "none";
-      continue;
-    }
+      const labelsEl = document.getElementById("labels");
 
-    const x = (v.x * 0.5 + 0.5) * window.innerWidth;
-    const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+      function addPinMesh(pin) {
+        if (pinMeshesById.has(pin.id)) return;
 
-    label.style.display = "block";
-    label.style.left = x + "px";
-    label.style.top = y + "px";
-  }
-}
+        // 3D sprite marker
+        const mat = new THREE.SpriteMaterial({ color: 0x0084e2 });
+        const sprite = new THREE.Sprite(mat);
+        sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
 
-const labelsEl = document.getElementById("labels");
+        const s = window.PIN_SCALE || 0.05;
+        sprite.scale.set(s, s, 1);
 
-function addPinMesh(pin) {
-  if (pinMeshesById.has(pin.id)) return;
+        pinGroup.add(sprite);
 
-  // 3D sprite marker
-  const mat = new THREE.SpriteMaterial({ color: 0x0084e2 });
-  const sprite = new THREE.Sprite(mat);
-  sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
+        // DOM label
+        const label = document.createElement("div");
+        label.className = "pinLabel";
+        label.textContent = pin.text || "(no text)";
+        labelsEl.appendChild(label);
 
-  const s = window.PIN_SCALE || 0.05;
-  sprite.scale.set(s, s, 1);
+        pinMeshesById.set(pin.id, { sprite, label, pin });
+      }
 
-  pinGroup.add(sprite);
-
-  // DOM label
-  const label = document.createElement("div");
-  label.className = "pinLabel";
-  label.textContent = pin.text || "(no text)";
-  labelsEl.appendChild(label);
-
-  pinMeshesById.set(pin.id, { sprite, label, pin });
-}
-
-function renderPinsList(pins) {
-  const el = document.getElementById("pinsList");
-  el.innerHTML = "";
-  pins
-    .slice()
-    .sort((a,b) => (b.time||0) - (a.time||0))
-    .forEach(p => {
-      const row = document.createElement("div");
-      row.className = "pinRow";
-      const t = new Date(p.time).toLocaleString();
-      row.innerHTML = `<div><strong>${escapeHtml(p.text || "(no text)")}</strong></div>
+      function renderPinsList(pins) {
+        const el = document.getElementById("pinsList");
+        el.innerHTML = "";
+        pins
+          .slice()
+          .sort((a, b) => (b.time || 0) - (a.time || 0))
+          .forEach((p) => {
+            const row = document.createElement("div");
+            row.className = "pinRow";
+            const t = new Date(p.time).toLocaleString();
+            row.innerHTML = `<div><strong>${escapeHtml(p.text || "(no text)")}</strong></div>
         <div><code>${p.author}</code> · ${t}</div>`;
-      el.appendChild(row);
-    });
-}
+            el.appendChild(row);
+          });
+      }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-  }[c]));
-}
+      function escapeHtml(s) {
+        return String(s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#039;",
+            })[c],
+        );
+      }
 
-//////////////////////
-// Local-first model //
-//////////////////////
+      //////////////////////
+      // Local-first model //
+      //////////////////////
 
-let pins = loadLocalPins();
-pins.forEach(addPinMesh);
-renderPinsList(pins);
+      let pins = loadLocalPins();
+      pins.forEach(addPinMesh);
+      renderPinsList(pins);
 
-function upsertPin(pin) {
-  const idx = pins.findIndex(p => p.id === pin.id);
-  if (idx === -1) pins.push(pin);
-  else pins[idx] = pin;
-  saveLocalPins(pins);
-  addPinMesh(pin);
-  renderPinsList(pins);
-}
+      function upsertPin(pin) {
+        const idx = pins.findIndex((p) => p.id === pin.id);
+        if (idx === -1) pins.push(pin);
+        else pins[idx] = pin;
+        saveLocalPins(pins);
+        addPinMesh(pin);
+        renderPinsList(pins);
+      }
 
-function mergePins(incomingPins) {
-  // Simple set-union by id; if same id exists, keep the newest time
-  const byId = new Map(pins.map(p => [p.id, p]));
-  for (const p of incomingPins) {
-    const existing = byId.get(p.id);
-    if (!existing || (p.time || 0) > (existing.time || 0)) byId.set(p.id, p);
-  }
-  pins = Array.from(byId.values());
-  saveLocalPins(pins);
+      function mergePins(incomingPins) {
+        // Simple set-union by id; if same id exists, keep the newest time
+        const byId = new Map(pins.map((p) => [p.id, p]));
+        for (const p of incomingPins) {
+          const existing = byId.get(p.id);
+          if (!existing || (p.time || 0) > (existing.time || 0))
+            byId.set(p.id, p);
+        }
+        pins = Array.from(byId.values());
+        saveLocalPins(pins);
 
-  // Ensure meshes exist
-  pins.forEach(addPinMesh);
-  renderPinsList(pins);
-}
+        // Ensure meshes exist
+        pins.forEach(addPinMesh);
+        renderPinsList(pins);
+      }
 
-//////////////////////
-// Load PLY (yours)  //
-//////////////////////
+      //////////////////////
+      // Load PLY (yours)  //
+      //////////////////////
 
-const loader = new THREE.PLYLoader();
-loader.load("scan.ply", (geometry) => {
-  geometry.computeVertexNormals();
-  geometryRef = geometry;
+      const loader = new THREE.PLYLoader();
+      loader.load("scans/scan.ply", (geometry) => {
+        geometry.computeVertexNormals();
+        geometryRef = geometry;
 
-  // Better height gradient: normalize z via bounding box
-  geometry.computeBoundingBox();
-  const bb = geometry.boundingBox;
-  const zMin = bb.min.z, zMax = bb.max.z;
-  const range = (zMax - zMin) || 1;
+        // Better height gradient: normalize z via bounding box
+        geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        const zMin = bb.min.z,
+          zMax = bb.max.z;
+        const range = zMax - zMin || 1;
 
-  const count = geometry.attributes.position.count;
-  const colors = new Float32Array(count * 3);
+        const count = geometry.attributes.position.count;
+        const colors = new Float32Array(count * 3);
 
-  for (let i = 0; i < count; i++) {
-    const z = geometry.attributes.position.getZ(i);
-    const t = (z - zMin) / range; // 0..1
-    // blue -> cyan -> yellow -> red-ish (simple ramp)
-    const r = Math.min(1, Math.max(0, 2*t));
-    const b = Math.min(1, Math.max(0, 2*(1-t)));
-    const g = 1 - Math.abs(t - 0.5) * 2;
-    colors[i*3+0] = r;
-    colors[i*3+1] = g;
-    colors[i*3+2] = b;
-  }
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        for (let i = 0; i < count; i++) {
+          const z = geometry.attributes.position.getZ(i);
+          const t = (z - zMin) / range; // 0..1
+          // blue -> cyan -> yellow -> red-ish (simple ramp)
+          const r = Math.min(1, Math.max(0, 2 * t));
+          const b = Math.min(1, Math.max(0, 2 * (1 - t)));
+          const g = 1 - Math.abs(t - 0.5) * 2;
+          colors[i * 3 + 0] = r;
+          colors[i * 3 + 1] = g;
+          colors[i * 3 + 2] = b;
+        }
+        geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
-  const material = new THREE.PointsMaterial({
-    vertexColors: true,
-    size: 0.01,
-    sizeAttenuation: true
-  });
+        const material = new THREE.PointsMaterial({
+          vertexColors: true,
+          size: 0.01,
+          sizeAttenuation: true,
+        });
 
-  pointsObj = new THREE.Points(geometry, material);
-  scene.add(pointsObj);
+        pointsObj = new THREE.Points(geometry, material);
+        scene.add(pointsObj);
 
-  // Optional: center camera/controls on the geometry
-  const center = new THREE.Vector3();
-  bb.getCenter(center);
-  controls.target.copy(center);
-  camera.position.copy(center.clone().add(new THREE.Vector3(0, 0, 2)));
+        // Optional: center camera/controls on the geometry
+        const center = new THREE.Vector3();
+        bb.getCenter(center);
+        controls.target.copy(center);
+        camera.position.copy(center.clone().add(new THREE.Vector3(0, 0, 2)));
 
-  console.log("PLY loaded:", count, "points");
-  setStatus("loaded scan.ply (" + count + " points). Device: " + DEVICE_ID);
-});
+        console.log("PLY loaded:", count, "points");
+        setStatus(
+          "loaded scans/scan.ply (" + count + " points). Device: " + DEVICE_ID,
+        );
+      });
 
-//////////////////////
-// Click to add pin  //
-//////////////////////
+      //////////////////////
+      // Click to add pin  //
+      //////////////////////
 
-let down = null;
+      let down = null;
 
-renderer.domElement.addEventListener("pointerdown", (ev) => {
-  down = { x: ev.clientX, y: ev.clientY, t: performance.now() };
-});
+      renderer.domElement.addEventListener("pointerdown", (ev) => {
+        down = { x: ev.clientX, y: ev.clientY, t: performance.now() };
+      });
 
-renderer.domElement.addEventListener("pointerup", async (ev) => {
-  if (!down) return;
+      renderer.domElement.addEventListener("pointerup", async (ev) => {
+        if (!down) return;
 
-  const dx = ev.clientX - down.x;
-  const dy = ev.clientY - down.y;
-  const dist = Math.hypot(dx, dy);
-  down = null;
+        const dx = ev.clientX - down.x;
+        const dy = ev.clientY - down.y;
+        const dist = Math.hypot(dx, dy);
+        down = null;
 
-  // If user dragged, don't place a pin
-  if (dist > 4) return;
+        // If user dragged, don't place a pin
+        if (dist > 4) return;
 
-  // Place pin on click
-  await tryAddPinAtEvent(ev);
-});
+        // Place pin on click
+        await tryAddPinAtEvent(ev);
+      });
 
-async function tryAddPinAtEvent(ev) {
-  // ignore clicks on HUD
-  const hud = document.getElementById("hud");
-  if (hud.contains(ev.target)) return;
+      async function tryAddPinAtEvent(ev) {
+        // ignore clicks on HUD
+        const hud = document.getElementById("hud");
+        if (hud.contains(ev.target)) return;
 
-  if (!pointsObj || !geometryRef) return;
+        if (!pointsObj || !geometryRef) return;
 
-  const rect = renderer.domElement.getBoundingClientRect();
-  mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-  mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
 
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObject(pointsObj, false);
-  if (!hits.length) { setStatus("no hit - click closer to the scan"); return; }
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObject(pointsObj, false);
+        if (!hits.length) {
+          setStatus("no hit - click closer to the scan");
+          return;
+        }
 
-  const idx = hits[0].index;
-  const pos = new THREE.Vector3(
-    geometryRef.attributes.position.getX(idx),
-    geometryRef.attributes.position.getY(idx),
-    geometryRef.attributes.position.getZ(idx)
-  );
+        const idx = hits[0].index;
+        const pos = new THREE.Vector3(
+          geometryRef.attributes.position.getX(idx),
+          geometryRef.attributes.position.getY(idx),
+          geometryRef.attributes.position.getZ(idx),
+        );
 
-  // Disable controls while prompting (prevents “stuck dragging”)
-  const prevEnabled = controls.enabled;
-  controls.enabled = false;
+        // Disable controls while prompting (prevents “stuck dragging”)
+        const prevEnabled = controls.enabled;
+        controls.enabled = false;
 
-  const text = prompt("Pin text:", "Needs review");
+        const text = prompt("Pin text:", "Needs review");
 
-  controls.enabled = prevEnabled;
+        controls.enabled = prevEnabled;
 
-  // Also forcibly stop any in-progress control interaction
-  controls.update();
+        // Also forcibly stop any in-progress control interaction
+        controls.update();
 
-  if (text === null) return;
+        if (text === null) return;
 
-  const pin = {
-    id: DEVICE_ID + "-" + Date.now().toString(16) + "-" + Math.random().toString(16).slice(2),
-    author: DEVICE_ID,
-    time: Date.now(),
-    pos: { x: pos.x, y: pos.y, z: pos.z },
-    text: text.trim()
-  };
+        const pin = {
+          id:
+            DEVICE_ID +
+            "-" +
+            Date.now().toString(16) +
+            "-" +
+            Math.random().toString(16).slice(2),
+          author: DEVICE_ID,
+          time: Date.now(),
+          pos: { x: pos.x, y: pos.y, z: pos.z },
+          text: text.trim(),
+        };
 
-  upsertPin(pin);
+        upsertPin(pin);
 
-  // Fly-to (your code)
-  controls.target.set(pin.pos.x, pin.pos.y, pin.pos.z);
-  camera.position.set(pin.pos.x, pin.pos.y, pin.pos.z + (window.PIN_SCALE || 0.2) * 20);
-  controls.update();
+        // Fly-to (your code)
+        controls.target.set(pin.pos.x, pin.pos.y, pin.pos.z);
+        camera.position.set(
+          pin.pos.x,
+          pin.pos.y,
+          pin.pos.z + (window.PIN_SCALE || 0.2) * 20,
+        );
+        controls.update();
 
-  setStatus("added pin (local). Now sync to share.");
-}
+        setStatus("added pin (local). Now sync to share.");
+      }
 
-//////////////////////
-// Sync UI           //
-//////////////////////
+      //////////////////////
+      // Sync UI           //
+      //////////////////////
 
-document.getElementById("syncBtn").addEventListener("click", async () => {
-  const peer = document.getElementById("peerUrl").value.trim().replace(/\/$/, "");
-  if (!peer) { setStatus("enter Peer URL first"); return; }
+      document.getElementById("syncBtn").addEventListener("click", async () => {
+        const peer = document
+          .getElementById("peerUrl")
+          .value.trim()
+          .replace(/\/$/, "");
 
-  try {
-    setStatus("syncing…");
+        if (!peer) {
+          setStatus("enter Peer URL first");
+          return;
+        }
 
-    // 1) get peer pins
-    const r1 = await fetch(peer + "/pins", { method: "GET" });
-    if (!r1.ok) throw new Error("GET /pins failed: " + r1.status);
-    const peerPins = await r1.json();
+        try {
+          setStatus("syncing…");
 
-    // 2) merge locally
-    mergePins(peerPins);
+          // 1) get peer pins
+          const r1 = await fetch(peer + "/pins", { method: "GET" });
+          if (!r1.ok) throw new Error("GET /pins failed: " + r1.status);
+          const peerPins = await r1.json();
 
-    // 3) send our merged pins back (simple two-way convergence)
-    const r2 = await fetch(peer + "/pins", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(pins)
-    });
-    if (!r2.ok) throw new Error("POST /pins failed: " + r2.status);
+          // 2) merge locally
+          mergePins(peerPins);
 
-    setStatus("synced. total pins: " + pins.length);
-  } catch (e) {
-    console.error(e);
-    setStatus("sync failed: " + e.message);
-  }
-});
+          // 3) send our merged pins back (simple two-way convergence)
+          const r2 = await fetch(peer + "/pins", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(pins),
+          });
+          if (!r2.ok) throw new Error("POST /pins failed: " + r2.status);
 
-document.getElementById("exportBtn").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(pins, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "pins.json";
-  a.click();
-  URL.revokeObjectURL(url);
-});
+          setStatus("synced. total pins: " + pins.length);
+        } catch (e) {
+          console.error(e);
+          setStatus("sync failed: " + e.message);
+        }
+      });
 
-document.getElementById("clearBtn").addEventListener("click", () => {
-  if (!confirm("Clear local pins on this device only?")) return;
-  pins = [];
-  saveLocalPins(pins);
-  // remove meshes
-  for (const obj of pinMeshesById.values()) {
-  pinGroup.remove(obj.sprite);
-  obj.label.remove();
-}
-pinMeshesById.clear();
-  renderPinsList(pins);
-  setStatus("cleared local pins");
-});
+      document.getElementById("exportBtn").addEventListener("click", () => {
+        const blob = new Blob([JSON.stringify(pins, null, 2)], {
+          type: "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "pins.json";
+        a.click();
+        URL.revokeObjectURL(url);
+      });
 
-//////////////////////
-// Render loop       //
-//////////////////////
+      document.getElementById("clearBtn").addEventListener("click", () => {
+        if (!confirm("Clear local pins on this device only?")) return;
+        pins = [];
+        saveLocalPins(pins);
+        // remove meshes
+        for (const obj of pinMeshesById.values()) {
+          pinGroup.remove(obj.sprite);
+          obj.label.remove();
+        }
+        pinMeshesById.clear();
+        renderPinsList(pins);
+        setStatus("cleared local pins");
+      });
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  updatePinLabels();
-  renderer.render(scene, camera);
-}
-animate();
+      //////////////////////
+      // Render loop       //
+      //////////////////////
 
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
-</script>
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        updatePinLabels();
+        renderer.render(scene, camera);
+      }
+      animate();
 
-</body>
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
 </html>
