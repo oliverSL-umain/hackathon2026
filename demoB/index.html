@@ -337,7 +337,7 @@ async function tryAddPinAtEvent(ev) {
   const prevEnabled = controls.enabled;
   controls.enabled = false;
 
-  const text = prompt("Pin text:", "Needs review");
+  const text = prompt("Pin text:", "Example annotation");
 
   controls.enabled = prevEnabled;
 
@@ -375,21 +375,31 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
   try {
     setStatus("syncing…");
 
-    // 1) get peer pins
+    // A) pull from peer
     const r1 = await fetch(peer + "/pins", { method: "GET" });
     if (!r1.ok) throw new Error("GET /pins failed: " + r1.status);
     const peerPins = await r1.json();
 
-    // 2) merge locally
+    // B) merge into our in-memory + localStorage
     mergePins(peerPins);
 
-    // 3) send our merged pins back (simple two-way convergence)
-    const r2 = await fetch(peer + "/pins", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(pins)
-    });
-    if (!r2.ok) throw new Error("POST /pins failed: " + r2.status);
+    // C) push merged state to BOTH:
+    //    1) peer server (remote)
+    //    2) our own server (same origin) so pins.json stays in sync too
+    const push = async (baseUrl) => {
+      const url = baseUrl ? (baseUrl + "/pins") : "/pins";
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pins)
+      });
+      if (!r.ok) throw new Error("POST " + url + " failed: " + r.status);
+    };
+
+    await Promise.all([
+      push(peer),
+      push("") // same-origin
+    ]);
 
     setStatus("synced. total pins: " + pins.length);
   } catch (e) {
