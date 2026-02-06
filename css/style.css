@@ -251,7 +251,6 @@ canvas {
 
 .status-message {
   color: var(--cyber-primary);
-  font-style: italic;
   animation: status-blink 1.5s ease-in-out infinite;
 }
 

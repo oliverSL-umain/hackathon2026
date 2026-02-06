@@ -153,7 +153,7 @@ function addPinMesh(pin) {
   pinGroup.add(pinMesh);
 
   const label = document.createElement("div");
-  label.className = "pinLabel";
+  label.className = "pin-label";
   label.textContent = pin.text || "(no text)";
   labelsEl.appendChild(label);
 
