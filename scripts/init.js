@@ -205,7 +205,13 @@ function updatePinLabels() {
 const labelsEl = document.getElementById("labels");
 
 function addPinMesh(pin) {
-  if (pinMeshesById.has(pin.id)) return;
+  if (pinMeshesById.has(pin.id)) {
+    // Update label text if pin data changed
+    const existing = pinMeshesById.get(pin.id);
+    existing.label.textContent = pin.text || "(no text)";
+    existing.pin = pin;
+    return;
+  }
 
   const geometry = new THREE.SphereGeometry(0.02, 8, 6);
   const material = new THREE.MeshBasicMaterial({
@@ -284,9 +290,8 @@ renderPinsList(pins);
   try {
     setStatus("Connecting to backend...");
     const apiPins = await fetchPinsFromAPI();
-    mergePins(apiPins);
-    saveLocalPins(pins);
-    setStatus(`Loaded ${pins.length} pins from backend`);
+    syncPinsFromDB(apiPins);
+    setStatus(`Loaded ${pins.length} pins from database`);
   } catch (e) {
     console.warn("Backend unavailable, using cached pins:", e);
     setStatus(`Using ${pins.length} cached pins (backend offline)`);
@@ -294,6 +299,7 @@ renderPinsList(pins);
 })();
 
 async function upsertPin(pin) {
+  // Optimistically add pin locally for instant feedback
   const idx = pins.findIndex((p) => p.id === pin.id);
   if (idx === -1) pins.push(pin);
   else pins[idx] = pin;
@@ -301,26 +307,34 @@ async function upsertPin(pin) {
   addPinMesh(pin);
   renderPinsList(pins);
 
-  // Persist to backend API
+  // Persist to backend API, then re-fetch DB state to confirm
   try {
     await savePinToAPI(pin);
+    const apiPins = await fetchPinsFromAPI();
+    syncPinsFromDB(apiPins);
   } catch (e) {
     console.error("Failed to save pin to backend:", e);
     setStatus("Pin saved locally (backend offline)");
   }
 }
 
-function mergePins(incomingPins) {
-  // Simple set-union by id; if same id exists, keep the newest time
-  const byId = new Map(pins.map((p) => [p.id, p]));
-  for (const p of incomingPins) {
-    const existing = byId.get(p.id);
-    if (!existing || (p.time || 0) > (existing.time || 0)) byId.set(p.id, p);
+function syncPinsFromDB(dbPins) {
+  const dbPinIds = new Set(dbPins.map((p) => p.id));
+
+  // Remove meshes/labels for pins no longer in the DB
+  for (const [id, obj] of pinMeshesById.entries()) {
+    if (!dbPinIds.has(id)) {
+      pinGroup.remove(obj.sprite);
+      obj.label.remove();
+      pinMeshesById.delete(id);
+    }
   }
-  pins = Array.from(byId.values());
+
+  // DB is the source of truth — replace local state entirely
+  pins = dbPins;
   saveLocalPins(pins);
 
-  // Ensure meshes exist
+  // Ensure meshes exist for all current pins
   pins.forEach(addPinMesh);
   renderPinsList(pins);
 }
@@ -500,8 +514,7 @@ document.getElementById("sync-btn").addEventListener("click", async () => {
 
     // Refresh pins from backend
     const apiPins = await fetchPinsFromAPI();
-    mergePins(apiPins);
-    saveLocalPins(pins);
+    syncPinsFromDB(apiPins);
 
     // Show sync status
     try {
@@ -552,14 +565,7 @@ document.getElementById("clearBtn").addEventListener("click", async () => {
 setInterval(async () => {
   try {
     const apiPins = await fetchPinsFromAPI();
-    const currentIds = new Set(pins.map((p) => p.id));
-    const hasNew = apiPins.some((p) => !currentIds.has(p.id));
-    const hasRemoved = apiPins.length < pins.length;
-
-    if (hasNew || hasRemoved) {
-      mergePins(apiPins);
-      saveLocalPins(pins);
-    }
+    syncPinsFromDB(apiPins);
   } catch {
     // Silently ignore polling errors
   }
