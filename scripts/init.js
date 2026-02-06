@@ -1,0 +1,424 @@
+/**
+ * What this does:
+ * - Loads scan-tree.ply and shows it as Points with height coloring (your original)
+ * - Lets you click on the scan to add a "pin" (small yellow sphere) with a text note
+ * - Stores pins locally in localStorage (works offline)
+ * - Sync button exchanges pins with a peer Pi over HTTP:
+ *     GET  {peer}/pins  -> returns JSON array of pins
+ *     POST {peer}/pins  -> accepts JSON array of pins, merges them
+ *
+ * You need a tiny server on each Pi serving:
+ *   - this index.html + scan-tree.ply
+ *   - a /pins endpoint (example Node server code is below the HTML)
+ */
+
+//////////////////////
+// Basic identifiers //
+//////////////////////
+//
+
+const DEVICE_ID_KEY = "pins.deviceId";
+function getOrCreateDeviceId() {
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id =
+      "pi-" +
+      Math.random().toString(16).slice(2) +
+      "-" +
+      Date.now().toString(16);
+    localStorage.setItem(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
+const DEVICE_ID = getOrCreateDeviceId();
+
+const PINS_KEY = "pins.list.v1";
+function loadLocalPins() {
+  try {
+    return JSON.parse(localStorage.getItem(PINS_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveLocalPins(pins) {
+  localStorage.setItem(PINS_KEY, JSON.stringify(pins));
+}
+
+function setStatus(msg) {
+  document.getElementById("status-message").textContent = msg;
+}
+
+//////////////////////
+// Three.js setup    //
+//////////////////////
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05060a);
+
+const camera = new THREE.PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.01,
+  2000,
+);
+camera.position.set(0, 0, 5);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
+
+let pointsObj = null; // THREE.Points
+let geometryRef = null; // BufferGeometry for points
+let pinGroup = new THREE.Group();
+scene.add(pinGroup);
+
+// Raycasting for picking
+const raycaster = new THREE.Raycaster();
+raycaster.params.Points.threshold = 0.3; // picking tolerance in world units (tune)
+const mouse = new THREE.Vector2();
+
+//////////////////////
+// Pins rendering    //
+//////////////////////
+
+// id -> Mesh so we don't duplicate
+const pinMeshesById = new Map();
+
+function updatePinLabels() {
+  for (const obj of pinMeshesById.values()) {
+    const { sprite, label, pin } = obj;
+
+    const v = new THREE.Vector3(pin.pos.x, pin.pos.y, pin.pos.z);
+    v.project(camera);
+
+    // behind camera? hide
+    if (v.z < -1 || v.z > 1) {
+      label.style.display = "none";
+      continue;
+    }
+
+    const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+
+    label.style.display = "block";
+    label.style.left = x + "px";
+    label.style.top = y + "px";
+  }
+}
+
+const labelsEl = document.getElementById("labels");
+
+function addPinMesh(pin) {
+  if (pinMeshesById.has(pin.id)) return;
+
+  // 3D sprite marker
+  const mat = new THREE.SpriteMaterial({ color: 0x0084e2 });
+  const sprite = new THREE.Sprite(mat);
+  sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
+
+  const s = window.PIN_SCALE || 0.05;
+  sprite.scale.set(s, s, 1);
+
+  pinGroup.add(sprite);
+
+  // DOM label
+  const label = document.createElement("div");
+  label.className = "pinLabel";
+  label.textContent = pin.text || "(no text)";
+  labelsEl.appendChild(label);
+
+  pinMeshesById.set(pin.id, { sprite, label, pin });
+}
+
+const renderPinsList = (pins) => {
+  const el = document.getElementById("pins-list-items");
+  el.innerHTML = "";
+  pins
+    .slice()
+    .sort((a, b) => (b.time || 0) - (a.time || 0))
+    .forEach((p) => {
+      const row = document.createElement("div");
+      row.className = "pin-row";
+      const t = new Date(p.time).toLocaleString();
+      row.innerHTML = `<div><strong>${escapeHtml(p.text || "(no text)")}</strong></div>
+        <div><code>${p.author}</code> · ${t}</div>`;
+      el.appendChild(row);
+    });
+};
+
+const escapeHtml = (s) => {
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;",
+      })[c],
+  );
+};
+
+//////////////////////
+// Local-first model //
+//////////////////////
+
+let pins = loadLocalPins();
+pins.forEach(addPinMesh);
+renderPinsList(pins);
+
+function upsertPin(pin) {
+  const idx = pins.findIndex((p) => p.id === pin.id);
+  if (idx === -1) pins.push(pin);
+  else pins[idx] = pin;
+  saveLocalPins(pins);
+  addPinMesh(pin);
+  renderPinsList(pins);
+}
+
+function mergePins(incomingPins) {
+  // Simple set-union by id; if same id exists, keep the newest time
+  const byId = new Map(pins.map((p) => [p.id, p]));
+  for (const p of incomingPins) {
+    const existing = byId.get(p.id);
+    if (!existing || (p.time || 0) > (existing.time || 0)) byId.set(p.id, p);
+  }
+  pins = Array.from(byId.values());
+  saveLocalPins(pins);
+
+  // Ensure meshes exist
+  pins.forEach(addPinMesh);
+  renderPinsList(pins);
+}
+
+//////////////////////
+// Load PLY (yours)  //
+//////////////////////
+
+const loader = new THREE.PLYLoader();
+loader.load("scans/scan-tree.ply", (geometry) => {
+  geometry.computeVertexNormals();
+  geometryRef = geometry;
+
+  // Better height gradient: normalize z via bounding box
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const zMin = bb.min.z,
+    zMax = bb.max.z;
+  const range = zMax - zMin || 1;
+
+  const count = geometry.attributes.position.count;
+  const colors = new Float32Array(count * 3);
+
+  for (let i = 0; i < count; i++) {
+    const z = geometry.attributes.position.getZ(i);
+    const t = (z - zMin) / range; // 0..1
+    // blue -> cyan -> yellow -> red-ish (simple ramp)
+    const r = Math.min(1, Math.max(0, 2 * t));
+    const b = Math.min(1, Math.max(0, 2 * (1 - t)));
+    const g = 1 - Math.abs(t - 0.5) * 2;
+    colors[i * 3 + 0] = r;
+    colors[i * 3 + 1] = g;
+    colors[i * 3 + 2] = b;
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+  const material = new THREE.PointsMaterial({
+    vertexColors: true,
+    size: 0.01,
+    sizeAttenuation: true,
+  });
+
+  pointsObj = new THREE.Points(geometry, material);
+  scene.add(pointsObj);
+
+  // Optional: center camera/controls on the geometry
+  const center = new THREE.Vector3();
+  bb.getCenter(center);
+  controls.target.copy(center);
+  camera.position.copy(center.clone().add(new THREE.Vector3(0, 0, 2)));
+
+  console.log("PLY loaded:", count, "points");
+  setStatus(
+    "loaded scans/scan-tree.ply (" + count + " points). Device: " + DEVICE_ID,
+  );
+});
+
+//////////////////////
+// Click to add pin  //
+//////////////////////
+
+let down = null;
+
+renderer.domElement.addEventListener("pointerdown", (ev) => {
+  down = { x: ev.clientX, y: ev.clientY, t: performance.now() };
+});
+
+renderer.domElement.addEventListener("pointerup", async (ev) => {
+  if (!down) return;
+
+  const dx = ev.clientX - down.x;
+  const dy = ev.clientY - down.y;
+  const dist = Math.hypot(dx, dy);
+  down = null;
+
+  // If user dragged, don't place a pin
+  if (dist > 4) return;
+
+  // Place pin on click
+  await tryAddPinAtEvent(ev);
+});
+
+async function tryAddPinAtEvent(ev) {
+  // ignore clicks on HUD
+  const hud = document.getElementById("hud");
+  if (hud.contains(ev.target)) return;
+
+  if (!pointsObj || !geometryRef) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObject(pointsObj, false);
+  if (!hits.length) {
+    setStatus("no hit - click closer to the scan");
+    return;
+  }
+
+  const idx = hits[0].index;
+  const pos = new THREE.Vector3(
+    geometryRef.attributes.position.getX(idx),
+    geometryRef.attributes.position.getY(idx),
+    geometryRef.attributes.position.getZ(idx),
+  );
+
+  // Disable controls while prompting (prevents “stuck dragging”)
+  const prevEnabled = controls.enabled;
+  controls.enabled = false;
+
+  const text = prompt("Pin text:", "Example annotation");
+
+  controls.enabled = prevEnabled;
+
+  // Also forcibly stop any in-progress control interaction
+  controls.update();
+
+  if (text === null) return;
+
+  const pin = {
+    id:
+      DEVICE_ID +
+      "-" +
+      Date.now().toString(16) +
+      "-" +
+      Math.random().toString(16).slice(2),
+    author: DEVICE_ID,
+    time: Date.now(),
+    pos: { x: pos.x, y: pos.y, z: pos.z },
+    text: text.trim(),
+  };
+
+  upsertPin(pin);
+
+  // Fly-to (your code)
+  controls.target.set(pin.pos.x, pin.pos.y, pin.pos.z);
+  camera.position.set(
+    pin.pos.x,
+    pin.pos.y,
+    pin.pos.z + (window.PIN_SCALE || 0.2) * 20,
+  );
+  controls.update();
+
+  setStatus("added pin (local). Now sync to share.");
+}
+
+//////////////////////
+// Sync UI           //
+//////////////////////
+
+document.getElementById("sync-btn").addEventListener("click", async () => {
+  const peer = document
+    .getElementById("peer-url")
+    .value.trim()
+    .replace(/\/$/, "");
+
+  if (!peer) {
+    setStatus("enter Peer URL first");
+    return;
+  }
+
+  try {
+    setStatus("syncing…");
+
+    // A) pull from peer
+    const r1 = await fetch(peer + "/pins", { method: "GET" });
+    if (!r1.ok) throw new Error("GET /pins failed: " + r1.status);
+    const peerPins = await r1.json();
+
+    // B) merge into our in-memory + localStorage
+    mergePins(peerPins);
+
+    // C) push merged state to BOTH:
+    //    1) peer server (remote)
+    //    2) our own server (same origin) so pins.json stays in sync too
+    const push = async (baseUrl) => {
+      const url = baseUrl ? baseUrl + "/pins" : "/pins";
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pins),
+      });
+      if (!r.ok) throw new Error("POST " + url + " failed: " + r.status);
+    };
+
+    await Promise.all([
+      push(peer),
+      push(""), // same-origin
+    ]);
+
+    setStatus("synced. total pins: " + pins.length);
+  } catch (e) {
+    console.error(e);
+    setStatus("sync failed: " + e.message);
+  }
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  if (!confirm("Clear local pins on this device only?")) return;
+  pins = [];
+  saveLocalPins(pins);
+  // remove meshes
+  for (const obj of pinMeshesById.values()) {
+    pinGroup.remove(obj.sprite);
+    obj.label.remove();
+  }
+  pinMeshesById.clear();
+  renderPinsList(pins);
+  setStatus("cleared local pins");
+});
+
+//////////////////////
+// Render loop       //
+//////////////////////
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  updatePinLabels();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
