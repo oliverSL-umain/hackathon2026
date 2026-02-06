@@ -11,49 +11,45 @@
 
     <div
       id="hud"
-      class="h-full bg-none hover:bg-black/80 text-xs transition-all duration-300 opacity-90 hover:opacity-100 text-white py-4 px-6 w-sm fixed top-0 left-0"
+      class="h-full cyber-panel text-xs transition-all duration-300 text-cyan-400 py-4 px-6 w-sm fixed top-0 left-0"
     >
       <div class="h-full flex flex-col gap-4 justify-between">
         <div>
           <div class="flex flex-col gap-2">
-            <div><h1 class="font-bold">Add pins to SPY</h1></div>
+            <div>
+              <h1 class="font-bold text-base mb-4">
+                Local-first Ply Annotations
+              </h1>
+            </div>
 
             <input
               id="peer-url"
-              placeholder="Peer URL with port"
-              class="w-full rounded-lg border bg-clip-padding text-sm font-medium inline-flex items-center justify-center whitespace-nowrap transition-all outline-none group/button select-none border-border bg-background hover:bg-muted hover:text-foreground h-8 px-2.5 text-xs"
+              placeholder=">> Enter Peer Address"
+              class="cyber-input"
             />
 
             <div class="flex flex-row gap-2">
-              <button
-                id="sync-btn"
-                class="rounded-lg border bg-clip-padding text-sm font-medium inline-flex items-center justify-center whitespace-nowrap transition-all outline-none group/button select-none border-border bg-background hover:bg-muted hover:text-foreground h-8 px-2.5 hover:cursor-pointer text-xs"
-              >
-                Sync
+              <button id="sync-btn" class="cyber-btn cyber-btn-primary">
+                Sync With Peer
               </button>
-              <button
-                id="clearBtn"
-                class="rounded-lg border bg-clip-padding text-sm font-medium inline-flex items-center justify-center whitespace-nowrap transition-all outline-none group/button select-none border-border bg-background hover:bg-muted hover:text-foreground h-8 px-2.5 hover:cursor-pointer text-xs"
-              >
-                Clear local pins
+              <button id="clearBtn" class="cyber-btn cyber-btn-primary">
+                Purge Local Data
               </button>
             </div>
 
-            <div id="status" class="flex flex-row gap-2 mt-4">
-              [Status]
-              <div id="status-message">Idle</div>
+            <div id="status" class="flex flex-row gap-2 mt-4 cyber-status">
+              <span class="status-prefix">[Status]</span>
+              <div id="status-message" class="status-message">Idle</div>
             </div>
           </div>
         </div>
 
-        <div class="">
-          <details class="text-xs">
-            <summary class="cursor-pointer">Pins list</summary>
-            <div id="pins-list" class="h-full overflow-auto">
-              <div id="pins-list-items"></div>
-            </div>
-          </details>
-        </div>
+        <details class="text-xs cyber-details" open>
+          <summary class="cursor-pointer cyber-summary">Active Pins</summary>
+          <div id="pins-list" class="h-full overflow-auto cyber-list">
+            <div id="pins-list-items"></div>
+          </div>
+        </details>
       </div>
     </div>
 

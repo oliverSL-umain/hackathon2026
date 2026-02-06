@@ -53,7 +53,8 @@ function setStatus(msg) {
 //////////////////////
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x05060a);
+// Deep cyberpunk void with subtle neon gradient
+scene.background = new THREE.Color(0x020208);
 
 const camera = new THREE.PerspectiveCamera(
   60,
@@ -70,7 +71,15 @@ document.body.appendChild(renderer.domElement);
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
+// Cyberpunk lighting setup
+scene.add(new THREE.HemisphereLight(0x00ffff, 0x440088, 0.3));
+// Add ambient cyan glow
+const ambientLight = new THREE.AmbientLight(0x004466, 0.2);
+scene.add(ambientLight);
+// Add directional neon light
+const neonLight = new THREE.DirectionalLight(0x00ffff, 0.4);
+neonLight.position.set(1, 1, 1);
+scene.add(neonLight);
 
 let pointsObj = null; // THREE.Points
 let geometryRef = null; // BufferGeometry for points
@@ -116,23 +125,39 @@ const labelsEl = document.getElementById("labels");
 function addPinMesh(pin) {
   if (pinMeshesById.has(pin.id)) return;
 
-  // 3D sprite marker
-  const mat = new THREE.SpriteMaterial({ color: 0x0084e2 });
-  const sprite = new THREE.Sprite(mat);
-  sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
+  const geometry = new THREE.SphereGeometry(0.02, 8, 6);
+  const material = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+    transparent: true,
+    opacity: 0.8,
+  });
+  const sphere = new THREE.Mesh(geometry, material);
+  sphere.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
 
-  const s = window.PIN_SCALE || 0.05;
-  sprite.scale.set(s, s, 1);
+  // Add glowing wireframe
+  const wireframeGeometry = new THREE.SphereGeometry(0.03, 8, 6);
+  const wireframeMaterial = new THREE.MeshBasicMaterial({
+    color: 0xff00ff,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.6,
+  });
+  const wireframe = new THREE.Mesh(wireframeGeometry, wireframeMaterial);
+  wireframe.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
 
-  pinGroup.add(sprite);
+  // Create pin group with both meshes
+  const pinMesh = new THREE.Group();
+  pinMesh.add(sphere);
+  pinMesh.add(wireframe);
 
-  // DOM label
+  pinGroup.add(pinMesh);
+
   const label = document.createElement("div");
   label.className = "pinLabel";
   label.textContent = pin.text || "(no text)";
   labelsEl.appendChild(label);
 
-  pinMeshesById.set(pin.id, { sprite, label, pin });
+  pinMeshesById.set(pin.id, { sprite: pinMesh, label, pin });
 }
 
 const renderPinsList = (pins) => {
@@ -145,8 +170,7 @@ const renderPinsList = (pins) => {
       const row = document.createElement("div");
       row.className = "pin-row";
       const t = new Date(p.time).toLocaleString();
-      row.innerHTML = `<div><strong>${escapeHtml(p.text || "(no text)")}</strong></div>
-        <div><code>${p.author}</code> · ${t}</div>`;
+      row.innerHTML = `<div><strong>${escapeHtml(p.text || "(no text)")}</strong></div><br /><code>${t}<br />${p.author}</code>`;
       el.appendChild(row);
     });
 };
@@ -219,10 +243,26 @@ loader.load("scans/scan-tree.ply", (geometry) => {
   for (let i = 0; i < count; i++) {
     const z = geometry.attributes.position.getZ(i);
     const t = (z - zMin) / range; // 0..1
-    // blue -> cyan -> yellow -> red-ish (simple ramp)
-    const r = Math.min(1, Math.max(0, 2 * t));
-    const b = Math.min(1, Math.max(0, 2 * (1 - t)));
-    const g = 1 - Math.abs(t - 0.5) * 2;
+    let r, g, b;
+    if (t < 0.33) {
+      // Deep blue to cyan
+      const localT = t * 3;
+      r = 0;
+      g = localT * 0.7;
+      b = 0.2 + localT * 0.8;
+    } else if (t < 0.66) {
+      // Cyan to magenta
+      const localT = (t - 0.33) * 3;
+      r = localT * 1.0;
+      g = 0.7 * (1 - localT * 0.5);
+      b = 1.0;
+    } else {
+      // Magenta to bright cyan
+      const localT = (t - 0.66) * 3;
+      r = 1.0 * (1 - localT);
+      g = 0.35 + localT * 0.65;
+      b = 1.0;
+    }
     colors[i * 3 + 0] = r;
     colors[i * 3 + 1] = g;
     colors[i * 3 + 2] = b;
@@ -231,8 +271,11 @@ loader.load("scans/scan-tree.ply", (geometry) => {
 
   const material = new THREE.PointsMaterial({
     vertexColors: true,
-    size: 0.01,
+    size: 0.015,
     sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending,
   });
 
   pointsObj = new THREE.Points(geometry, material);
@@ -244,10 +287,7 @@ loader.load("scans/scan-tree.ply", (geometry) => {
   controls.target.copy(center);
   camera.position.copy(center.clone().add(new THREE.Vector3(0, 0, 2)));
 
-  console.log("PLY loaded:", count, "points");
-  setStatus(
-    "loaded scans/scan-tree.ply (" + count + " points). Device: " + DEVICE_ID,
-  );
+  setStatus("Loaded " + count + " points. Device: " + DEVICE_ID);
 });
 
 //////////////////////
@@ -337,7 +377,7 @@ async function tryAddPinAtEvent(ev) {
   );
   controls.update();
 
-  setStatus("added pin (local). Now sync to share.");
+  setStatus("Ready for sync");
 }
 
 //////////////////////
@@ -351,12 +391,12 @@ document.getElementById("sync-btn").addEventListener("click", async () => {
     .replace(/\/$/, "");
 
   if (!peer) {
-    setStatus("enter Peer URL first");
+    setStatus("Error - Peer address required");
     return;
   }
 
   try {
-    setStatus("syncing…");
+    setStatus("Syncing data...");
 
     // A) pull from peer
     const r1 = await fetch(peer + "/pins", { method: "GET" });
@@ -384,10 +424,10 @@ document.getElementById("sync-btn").addEventListener("click", async () => {
       push(""), // same-origin
     ]);
 
-    setStatus("synced. total pins: " + pins.length);
+    setStatus("Synced. Total pins: " + pins.length);
   } catch (e) {
     console.error(e);
-    setStatus("sync failed: " + e.message);
+    setStatus("Sync failed: " + e.message);
   }
 });
 
@@ -402,7 +442,7 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   }
   pinMeshesById.clear();
   renderPinsList(pins);
-  setStatus("cleared local pins");
+  setStatus("Cleared local pins");
 });
 
 //////////////////////
@@ -413,6 +453,27 @@ function animate() {
   requestAnimationFrame(animate);
   controls.update();
   updatePinLabels();
+
+  // Cyberpunk pin pulsing animation
+  const time = Date.now() * 0.002;
+  for (const obj of pinMeshesById.values()) {
+    const { sprite } = obj;
+    if (sprite && sprite.children) {
+      // Pulse the inner sphere
+      const innerSphere = sprite.children[0];
+      if (innerSphere) {
+        innerSphere.material.opacity = 0.6 + 0.4 * Math.sin(time * 2);
+      }
+      // Rotate the wireframe
+      const wireframe = sprite.children[1];
+      if (wireframe) {
+        wireframe.rotation.x = time * 0.5;
+        wireframe.rotation.y = time * 0.7;
+        wireframe.material.opacity = 0.4 + 0.3 * Math.sin(time * 3);
+      }
+    }
+  }
+
   renderer.render(scene, camera);
 }
 animate();
