@@ -3,6 +3,7 @@ body {
   overflow: hidden;
   font-family: system-ui, Arial;
 }
+
 canvas {
   display: block;
 }
