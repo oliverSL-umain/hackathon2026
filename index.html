@@ -136,34 +136,6 @@ const mouse = new THREE.Vector2();
 // id -> Mesh so we don't duplicate
 const pinMeshesById = new Map();
 
-// function addPinMesh(pin) {
-//   if (pinMeshesById.has(pin.id)) return;
-
-//   const geom = new THREE.SphereGeometry(0.02, 16, 16);
-//   const mat = new THREE.MeshStandardMaterial({ color: 0xffd54a, emissive: 0x221600 });
-//   const mesh = new THREE.Mesh(geom, mat);
-//   mesh.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
-//   mesh.userData.pinId = pin.id;
-
-//   pinGroup.add(mesh);
-//   pinMeshesById.set(pin.id, mesh);
-// }
-
-// function addPinMesh(pin) {
-//   if (pinMeshesById.has(pin.id)) return;
-
-//   const mat = new THREE.SpriteMaterial({ color: 0xff2dd4 }); // bright pink
-//   const sprite = new THREE.Sprite(mat);
-//   sprite.position.set(pin.pos.x, pin.pos.y, pin.pos.z);
-
-//   // scale based on scan size (we’ll set PIN_SCALE after loading)
-//   const s = window.PIN_SCALE || 0.05;
-//   sprite.scale.set(s, s, 1);
-
-//   pinGroup.add(sprite);
-//   pinMeshesById.set(pin.id, sprite);
-// }
-
 function updatePinLabels() {
   for (const obj of pinMeshesById.values()) {
     const { sprite, label, pin } = obj;
@@ -318,7 +290,28 @@ loader.load("scan.ply", (geometry) => {
 // Click to add pin  //
 //////////////////////
 
+let down = null;
+
 renderer.domElement.addEventListener("pointerdown", (ev) => {
+  down = { x: ev.clientX, y: ev.clientY, t: performance.now() };
+});
+
+renderer.domElement.addEventListener("pointerup", async (ev) => {
+  if (!down) return;
+
+  const dx = ev.clientX - down.x;
+  const dy = ev.clientY - down.y;
+  const dist = Math.hypot(dx, dy);
+  down = null;
+
+  // If user dragged, don't place a pin
+  if (dist > 4) return;
+
+  // Place pin on click
+  await tryAddPinAtEvent(ev);
+});
+
+async function tryAddPinAtEvent(ev) {
   // ignore clicks on HUD
   const hud = document.getElementById("hud");
   if (hud.contains(ev.target)) return;
@@ -331,23 +324,26 @@ renderer.domElement.addEventListener("pointerdown", (ev) => {
 
   raycaster.setFromCamera(mouse, camera);
   const hits = raycaster.intersectObject(pointsObj, false);
+  if (!hits.length) { setStatus("no hit - click closer to the scan"); return; }
 
-  if (!hits.length) {
-    setStatus("no hit - click closer to the scan");
-    return;
-  }
-
-  // hits[0].index is the vertex index in the Points geometry
-  const hit = hits[0];
-  const idx = hit.index;
-
+  const idx = hits[0].index;
   const pos = new THREE.Vector3(
     geometryRef.attributes.position.getX(idx),
     geometryRef.attributes.position.getY(idx),
-    geometryRef.attributes.position.getZ(idx),
+    geometryRef.attributes.position.getZ(idx)
   );
 
+  // Disable controls while prompting (prevents “stuck dragging”)
+  const prevEnabled = controls.enabled;
+  controls.enabled = false;
+
   const text = prompt("Pin text:", "Needs review");
+
+  controls.enabled = prevEnabled;
+
+  // Also forcibly stop any in-progress control interaction
+  controls.update();
+
   if (text === null) return;
 
   const pin = {
@@ -359,11 +355,14 @@ renderer.domElement.addEventListener("pointerdown", (ev) => {
   };
 
   upsertPin(pin);
+
+  // Fly-to (your code)
   controls.target.set(pin.pos.x, pin.pos.y, pin.pos.z);
   camera.position.set(pin.pos.x, pin.pos.y, pin.pos.z + (window.PIN_SCALE || 0.2) * 20);
   controls.update();
+
   setStatus("added pin (local). Now sync to share.");
-});
+}
 
 //////////////////////
 // Sync UI           //
