@@ -34,7 +34,7 @@
     <script>
       /**
        * What this does:
-       * - Loads scan.ply and shows it as Points with height coloring (your original)
+       * - Loads scan-tree.ply and shows it as Points with height coloring (your original)
        * - Lets you click on the scan to add a "pin" (small yellow sphere) with a text note
        * - Stores pins locally in localStorage (works offline)
        * - Sync button exchanges pins with a peer Pi over HTTP:
@@ -42,7 +42,7 @@
        *     POST {peer}/pins  -> accepts JSON array of pins, merges them
        *
        * You need a tiny server on each Pi serving:
-       *   - this index.html + scan.ply
+       *   - this index.html + scan-tree.ply
        *   - a /pins endpoint (example Node server code is below the HTML)
        */
 
@@ -236,7 +236,7 @@
       //////////////////////
 
       const loader = new THREE.PLYLoader();
-      loader.load("scans/scan.ply", (geometry) => {
+      loader.load("scans/scan-tree.ply", (geometry) => {
         geometry.computeVertexNormals();
         geometryRef = geometry;
 
@@ -280,7 +280,10 @@
 
         console.log("PLY loaded:", count, "points");
         setStatus(
-          "loaded scans/scan.ply (" + count + " points). Device: " + DEVICE_ID,
+          "loaded scans/scan-tree.ply (" +
+            count +
+            " points). Device: " +
+            DEVICE_ID,
         );
       });
 

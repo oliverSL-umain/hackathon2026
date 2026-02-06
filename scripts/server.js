@@ -13,7 +13,7 @@ const PINS_FILE = path.join(
   "../json/pins-" + CURRENT_PORT + ".json",
 );
 
-// static files (index.html, scan.ply, three.min.js, etc.)
+// static files (index.html, scan-tree.ply, three.min.js, etc.)
 app.use(express.static(PUBLIC_DIR));
 
 function readPins() {
