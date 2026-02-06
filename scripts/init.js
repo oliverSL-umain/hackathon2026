@@ -1,15 +1,19 @@
 /**
  * What this does:
- * - Loads scan-tree.ply and shows it as Points with height coloring (your original)
- * - Lets you click on the scan to add a "pin" (small yellow sphere) with a text note
- * - Stores pins locally in localStorage (works offline)
- * - Sync button exchanges pins with a peer Pi over HTTP:
- *     GET  {peer}/pins  -> returns JSON array of pins
- *     POST {peer}/pins  -> accepts JSON array of pins, merges them
+ * - Loads scan-tree.ply and shows it as Points with height coloring
+ * - Lets you click on the scan to add a "pin" (small sphere) with a text note
+ * - Pins are persisted to a CouchDB backend API (localhost:3001)
+ * - localStorage is used as a fast cache for instant loading
+ * - Sync button triggers CouchDB bidirectional replication to cloud
+ * - Live polling (every 5s) picks up changes from other users
  *
- * You need a tiny server on each Pi serving:
- *   - this index.html + scan-tree.ply
- *   - a /pins endpoint (example Node server code is below the HTML)
+ * Backend API (Express + CouchDB on port 3001):
+ *   GET    /api/documents      -> list all documents
+ *   POST   /api/documents      -> create a new document
+ *   PUT    /api/documents/:id  -> update a document
+ *   DELETE /api/documents/:id  -> delete a document
+ *   POST   /api/sync           -> trigger cloud sync
+ *   GET    /api/sync/status    -> get sync status
  */
 
 //////////////////////
@@ -42,6 +46,84 @@ function loadLocalPins() {
 }
 function saveLocalPins(pins) {
   localStorage.setItem(PINS_KEY, JSON.stringify(pins));
+}
+
+//////////////////////
+// Backend API       //
+//////////////////////
+
+const API_BASE = "http://localhost:3001";
+const POLL_INTERVAL = 5000;
+const pinRevisions = new Map(); // Track CouchDB _rev for updates/deletes
+
+async function fetchPinsFromAPI() {
+  const res = await fetch(`${API_BASE}/api/documents`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  const data = await res.json();
+
+  // Handle both array and CouchDB-style response
+  const docs = Array.isArray(data)
+    ? data
+    : (data.rows || []).map((r) => r.doc || r);
+
+  return docs
+    .filter((doc) => doc && doc.pos) // Must have position data to be a pin
+    .map((doc) => {
+      if (doc._rev) pinRevisions.set(doc._id || doc.id, doc._rev);
+      return {
+        id: doc._id || doc.id,
+        author: doc.author,
+        time: doc.time,
+        pos: doc.pos,
+        text: doc.text,
+      };
+    });
+}
+
+async function savePinToAPI(pin) {
+  const doc = {
+    _id: pin.id,
+    type: "pin",
+    id: pin.id,
+    author: pin.author,
+    time: pin.time,
+    pos: pin.pos,
+    text: pin.text,
+  };
+
+  const res = await fetch(`${API_BASE}/api/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(doc),
+  });
+
+  if (!res.ok) throw new Error(`Failed to save pin: ${res.status}`);
+  const result = await res.json();
+  if (result.rev || result._rev)
+    pinRevisions.set(pin.id, result.rev || result._rev);
+  return result;
+}
+
+async function deletePinFromAPI(pinId) {
+  const res = await fetch(
+    `${API_BASE}/api/documents/${encodeURIComponent(pinId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404)
+    throw new Error(`Failed to delete: ${res.status}`);
+  pinRevisions.delete(pinId);
+}
+
+async function triggerAPISync() {
+  const res = await fetch(`${API_BASE}/api/sync`, { method: "POST" });
+  if (!res.ok) throw new Error(`Sync failed: ${res.status}`);
+  return await res.json();
+}
+
+async function getAPISyncStatus() {
+  const res = await fetch(`${API_BASE}/api/sync/status`);
+  if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
+  return await res.json();
 }
 
 function setStatus(msg) {
@@ -193,17 +275,39 @@ const escapeHtml = (s) => {
 // Local-first model //
 //////////////////////
 
-let pins = loadLocalPins();
+let pins = loadLocalPins(); // Start with cached pins for instant load
 pins.forEach(addPinMesh);
 renderPinsList(pins);
 
-function upsertPin(pin) {
+// Then fetch latest from backend API
+(async () => {
+  try {
+    setStatus("Connecting to backend...");
+    const apiPins = await fetchPinsFromAPI();
+    mergePins(apiPins);
+    saveLocalPins(pins);
+    setStatus(`Loaded ${pins.length} pins from backend`);
+  } catch (e) {
+    console.warn("Backend unavailable, using cached pins:", e);
+    setStatus(`Using ${pins.length} cached pins (backend offline)`);
+  }
+})();
+
+async function upsertPin(pin) {
   const idx = pins.findIndex((p) => p.id === pin.id);
   if (idx === -1) pins.push(pin);
   else pins[idx] = pin;
   saveLocalPins(pins);
   addPinMesh(pin);
   renderPinsList(pins);
+
+  // Persist to backend API
+  try {
+    await savePinToAPI(pin);
+  } catch (e) {
+    console.error("Failed to save pin to backend:", e);
+    setStatus("Pin saved locally (backend offline)");
+  }
 }
 
 function mergePins(incomingPins) {
@@ -385,65 +489,81 @@ async function tryAddPinAtEvent(ev) {
 //////////////////////
 
 document.getElementById("sync-btn").addEventListener("click", async () => {
-  const peer = document
-    .getElementById("peer-url")
-    .value.trim()
-    .replace(/\/$/, "");
-
-  if (!peer) {
-    setStatus("Error - Peer address required");
-    return;
-  }
-
   try {
-    setStatus("Syncing data...");
+    setStatus("Triggering cloud sync...");
 
-    // A) pull from peer
-    const r1 = await fetch(peer + "/pins", { method: "GET" });
-    if (!r1.ok) throw new Error("GET /pins failed: " + r1.status);
-    const peerPins = await r1.json();
+    // Trigger CouchDB bidirectional replication
+    await triggerAPISync();
 
-    // B) merge into our in-memory + localStorage
-    mergePins(peerPins);
+    // Brief wait for replication to propagate
+    await new Promise((r) => setTimeout(r, 1000));
 
-    // C) push merged state to BOTH:
-    //    1) peer server (remote)
-    //    2) our own server (same origin) so pins.json stays in sync too
-    const push = async (baseUrl) => {
-      const url = baseUrl ? baseUrl + "/pins" : "/pins";
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pins),
-      });
-      if (!r.ok) throw new Error("POST " + url + " failed: " + r.status);
-    };
+    // Refresh pins from backend
+    const apiPins = await fetchPinsFromAPI();
+    mergePins(apiPins);
+    saveLocalPins(pins);
 
-    await Promise.all([
-      push(peer),
-      push(""), // same-origin
-    ]);
-
-    setStatus("Synced. Total pins: " + pins.length);
+    // Show sync status
+    try {
+      const status = await getAPISyncStatus();
+      const cloudCount = status.cloudDocCount ?? "?";
+      setStatus(
+        `Synced. Local: ${pins.length} pins | Cloud: ${cloudCount} docs`,
+      );
+    } catch {
+      setStatus(`Synced. ${pins.length} pins loaded`);
+    }
   } catch (e) {
     console.error(e);
     setStatus("Sync failed: " + e.message);
   }
 });
 
-document.getElementById("clearBtn").addEventListener("click", () => {
-  if (!confirm("Clear local pins on this device only?")) return;
+document.getElementById("clearBtn").addEventListener("click", async () => {
+  if (!confirm("Delete ALL pins from the database?")) return;
+
+  setStatus("Deleting all pins...");
+
+  // Delete from backend API
+  const deletePromises = pins.map((pin) =>
+    deletePinFromAPI(pin.id).catch((e) =>
+      console.warn(`Failed to delete ${pin.id}:`, e),
+    ),
+  );
+  await Promise.all(deletePromises);
+
   pins = [];
   saveLocalPins(pins);
-  // remove meshes
+
+  // Remove meshes
   for (const obj of pinMeshesById.values()) {
     pinGroup.remove(obj.sprite);
     obj.label.remove();
   }
   pinMeshesById.clear();
   renderPinsList(pins);
-  setStatus("Cleared local pins");
+  setStatus("All pins deleted");
 });
+
+//////////////////////
+// Live polling      //
+//////////////////////
+
+setInterval(async () => {
+  try {
+    const apiPins = await fetchPinsFromAPI();
+    const currentIds = new Set(pins.map((p) => p.id));
+    const hasNew = apiPins.some((p) => !currentIds.has(p.id));
+    const hasRemoved = apiPins.length < pins.length;
+
+    if (hasNew || hasRemoved) {
+      mergePins(apiPins);
+      saveLocalPins(pins);
+    }
+  } catch {
+    // Silently ignore polling errors
+  }
+}, POLL_INTERVAL);
 
 //////////////////////
 // Render loop       //
