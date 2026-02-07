@@ -53,7 +53,7 @@ function saveLocalPins(pins) {
 //////////////////////
 
 const API_BASE = window.APP_CONFIG?.API_BASE || "http://100.117.208.76:3001";
-const POLL_INTERVAL = 5000;
+const POLL_INTERVAL = 1000;
 const pinRevisions = new Map(); // Track CouchDB _rev for updates/deletes
 
 async function fetchPinsFromAPI() {
