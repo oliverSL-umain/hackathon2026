@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "4444:8080"
+    environment:
+      - PORT=8080
+    volumes:
+      - pin-data:/app/json
+    restart: unless-stopped
+
+volumes:
+  pin-data:
